@@ -1,0 +1,11 @@
+{
+    "name": "HTML2PDF",
+    "id": 20001,
+    "commands": [
+        {
+            "theme": "HTML2PDF",
+            "syntax": "HTML2PDF(&T;&T):L",
+            "threadSafe": false
+        }
+    ]
+}

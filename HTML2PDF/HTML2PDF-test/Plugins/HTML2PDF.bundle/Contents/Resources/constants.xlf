@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<xliff version="1.0" xmlns:d4="http://www.4d.com/d4-ns">
+<header>
+    <note>HTML2PDF</note>
+</header>
+<group resname="themes">
+    <trans-unit id="html2pdf" resname="html2pdf" translate="no">
+        <source>HTML2PDF</source>
+    </trans-unit>
+</group>
+<group restype="x-4DK#" d4:groupName="html2pdf">
+    <trans-unit d4:value="0" id="html2pdf_ok">
+        <source>HTML2PDF OK</source>
+    </trans-unit>
+</group>
+</xliff>
