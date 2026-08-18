@@ -64,6 +64,8 @@ elseif(WIN32)
         OUTPUT_NAME "HTML2PDF"
         SUFFIX ".4DX"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/HTML2PDF-test/Plugins/HTML2PDF/Contents/Windows64"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/HTML2PDF-test/Plugins/HTML2PDF/Contents/Windows64"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/HTML2PDF-test/Plugins/HTML2PDF/Contents/Windows64"
     )
     target_link_options(HTML2PDF PRIVATE "/DEF:${SDK_DIR}/4DPluginAPI.def")
     target_link_libraries(HTML2PDF PRIVATE shlwapi)
