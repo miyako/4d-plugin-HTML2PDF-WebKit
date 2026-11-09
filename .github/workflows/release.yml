@@ -1,14 +1,7 @@
-name: Build & Release
+name: Build
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing tag to build (e.g. v2.3.0)
-        required: true
 
 permissions:
   contents: write
@@ -18,7 +11,7 @@ env:
   MACOS_DEPLOYMENT_TARGET: '11.0'
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-publication
   cancel-in-progress: false
 
 jobs:
@@ -26,14 +19,20 @@ jobs:
   version:
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.set.outputs.tag }}
       version: ${{ steps.set.outputs.version }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: lifecycle regression tests
+        run: python3 -m unittest discover -s tests -v
       - id: set
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ inputs.tag || github.ref_name }}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          VERSION=$(python3 scripts/release.py check --sha "$GITHUB_SHA")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
   build-windows:
     name: Build Windows (x64)
@@ -42,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ github.sha }}
           submodules: recursive
 
       - name: build with CMake
@@ -68,7 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ github.sha }}
           submodules: recursive
 
       - name: download windows binaries
@@ -154,18 +153,23 @@ jobs:
           ditto -c -k --keepParent "$BUNDLE_PATH" "$ZIP_PATH"
           hdiutil create -format UDBZ -volname "${{ env.PRODUCT_NAME }}" -srcfolder "$BUNDLE_PATH" "$DMG_PATH"
 
-          xcrun notarytool submit "$ZIP_PATH" --keychain-profile "notarytool-profile" --keychain "$KEYCHAIN_PATH" --wait
-          xcrun notarytool submit "$DMG_PATH" --keychain-profile "notarytool-profile" --keychain "$KEYCHAIN_PATH" --wait
+          xcrun notarytool submit "$ZIP_PATH" --keychain-profile "notarytool-profile" --keychain "$KEYCHAIN_PATH" --wait --output-format json > "$RUNNER_TEMP/zip-notary.json"
+          xcrun notarytool submit "$DMG_PATH" --keychain-profile "notarytool-profile" --keychain "$KEYCHAIN_PATH" --wait --output-format json > "$RUNNER_TEMP/dmg-notary.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          for name in ("zip", "dmg"):
+              result = json.loads((Path(os.environ["RUNNER_TEMP"]) / f"{name}-notary.json").read_text())
+              if result.get("status") != "Accepted":
+                  raise SystemExit(f"{name} notarization was not Accepted: {result}")
+          PY
           xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
 
           echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
           echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
 
-      - name: create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.version.outputs.tag }}
-          name: ${{ needs.version.outputs.tag }}
-          files: |
-            ${{ env.ZIP_PATH }}
-            ${{ env.DMG_PATH }}
+      - name: tag selected commit and create new release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py publish --sha "$GITHUB_SHA"

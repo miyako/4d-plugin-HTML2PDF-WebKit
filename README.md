@@ -126,8 +126,59 @@ This project includes three GitHub Actions workflows:
 | Workflow | Trigger | Description |
 |---|---|---|
 | `test.yml` | Tag push / manual | Builds and tests on macOS + Windows |
-| `bump-version.yml` | Manual | Bumps `VERSION`, commits, and pushes a `vX.Y.Z` tag |
-| `release.yml` | `v*.*.*` tag | Builds universal binary, codesigns, notarizes, publishes release |
+| `bump-version.yml` (Bump version) | Manual, patch/minor/major | Commits coordinated version metadata to the selected branch only; no tag, release, or build |
+| `release.yml` (Build) | Manual, no inputs | Builds the selected commit, verifies, signs, notarizes, then creates a new tag and release |
+
+### Version and publication lifecycle
+
+`VERSION` is the authoritative canonical `X.Y.Z` (no leading zeroes, suffixes,
+or extra components). CMake reads it directly and supplies both macOS bundle
+version fields through `HTML2PDF/Info.plist.in`; there is no separate build
+counter. The lifecycle helper checks these source bindings for drift. Tracked
+prebuilt bundles, the WebView2 SDK version, and 4D schema/compatibility metadata
+are not version sources and are not rewritten.
+
+Run **Bump version** on the desired branch to prepare a metadata-only commit.
+Its nonforced push targets only that branch, explicitly disables follow-tags,
+and fails if the branch moved incompatibly since selection. Existing tags and
+build references are left intact. Then run **Build**, selecting the desired
+branch in Actions. It has no version or tag input: every checkout uses the
+immutable selected `github.sha`, and source metadata determines `vX.Y.Z`.
+An existing remote tag or release blocks the build; API, network, and metadata
+errors fail explicitly rather than being treated as an unused version.
+
+Build retains Windows x64/WebView2 and universal macOS/WebKit builds, binary
+and signing verification, notarization of both packages with an explicit
+`Accepted` check, and DMG stapling/validation. Only after these steps succeed
+does it recheck availability, nonforcibly push `vX.Y.Z` at the selected SHA,
+and create a new release with `HTML2PDF-X.Y.Z.zip` and `HTML2PDF-X.Y.Z.dmg`.
+Publication is serialized across branches. No existing tag, release, or asset
+is overwritten or deleted. Rerunning Build for an already published version
+fails; prepare a new version instead.
+
+**Partial publication recovery:** a failure during/after tag push may leave
+the tag, a release, or only some assets. Inspect the Actions log, remote tag SHA,
+release, and asset list manually. Do not delete/move the tag, overwrite assets,
+or rerun Build to repair it. A maintainer can complete a missing release or
+upload only missing, verified assets for that exact SHA after inspection;
+otherwise prepare a new version and run Build separately.
+
+The unrelated **Build and Test** workflow remains tag-push/manual only; topic
+branch pushes and pull requests do not start it. Tags pushed using the workflow's
+`GITHUB_TOKEN` do not trigger another workflow automatically, so run that test
+workflow manually when needed. Neither Bump version nor Build dispatches it.
+
+Local lifecycle checks (no native build, credentials, or publication required):
+
+```bash
+python3 scripts/release.py version
+python3 -m unittest discover -s tests -v
+actionlint .github/workflows/bump-version.yml .github/workflows/release.yml
+```
+
+The fixtures derive the live expected version and rerun the suite in a temporary
+copy after a patch bump. They also cover invalid/drifted metadata, API failures,
+existing publication, selected-SHA publication, and nonforced Git races.
 
 ### Required Secrets (for `release.yml` only)
 
