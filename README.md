@@ -144,20 +144,26 @@ and fails if the branch moved incompatibly since selection. Existing tags and
 build references are left intact. Then run **Build**, selecting the desired
 branch in Actions. It has no version or tag input: every checkout uses the
 immutable selected `github.sha`, and source metadata determines `vX.Y.Z`.
-An existing remote tag or release blocks the build; API, network, and metadata
+An existing remote tag or release (including a draft found through authenticated,
+paginated release listing) blocks the build; API, network, and metadata
 errors fail explicitly rather than being treated as an unused version.
 
 Build retains Windows x64/WebView2 and universal macOS/WebKit builds, binary
 and signing verification, notarization of both packages with an explicit
 `Accepted` check, and DMG stapling/validation. Only after these steps succeed
 does it recheck availability, nonforcibly push `vX.Y.Z` at the selected SHA,
-and create a new release with `HTML2PDF-X.Y.Z.zip` and `HTML2PDF-X.Y.Z.dmg`.
+and create a new published release through a create-only REST POST, with generated
+release notes. It then uploads `HTML2PDF-X.Y.Z.zip` and `HTML2PDF-X.Y.Z.dmg`
+without clobbering assets. It does not use `gh release create` with assets,
+which can automatically delete its temporary draft on failure.
 Publication is serialized across branches. No existing tag, release, or asset
 is overwritten or deleted. Rerunning Build for an already published version
 fails; prepare a new version instead.
 
 **Partial publication recovery:** a failure during/after tag push may leave
-the tag, a release, or only some assets. Inspect the Actions log, remote tag SHA,
+the tag, a published release without assets, or only some assets. No automatic
+delete, rollback, or update-existing operation runs on failure.
+Inspect the Actions log, remote tag SHA,
 release, and asset list manually. Do not delete/move the tag, overwrite assets,
 or rerun Build to repair it. A maintainer can complete a missing release or
 upload only missing, verified assets for that exact SHA after inspection;

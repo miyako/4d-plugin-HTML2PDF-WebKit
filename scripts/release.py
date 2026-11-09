@@ -9,7 +9,6 @@ import plistlib
 import re
 import subprocess
 import sys
-import urllib.error
 import urllib.request
 
 
@@ -68,30 +67,37 @@ def git(*args):
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
 
 
-def api(path, missing_ok=False):
+def api(path, payload=None, expected_type=dict):
     request = urllib.request.Request(
         f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        method="POST" if payload is not None else "GET",
         headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
                  "Accept": "application/vnd.github+json",
+                 "Content-Type": "application/json",
                  "X-GitHub-Api-Version": "2022-11-28"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            result = json.load(response)
-            if not isinstance(result, dict):
-                raise ValueError(f"Unexpected GitHub API response for {path or 'repository'}")
-            return result
-    except urllib.error.HTTPError as error:
-        if error.code == 404 and missing_ok:
-            return None
-        raise
+    with urllib.request.urlopen(request, timeout=30) as response:
+        result = json.load(response)
+        if not isinstance(result, expected_type):
+            raise ValueError(f"Unexpected GitHub API response for {path or 'repository'}")
+        return result
 
 
 def no_release(tag):
     # A missing/inaccessible repository must not masquerade as an unused version.
     api("")
-    if api(f"/releases/tags/{tag}", missing_ok=True) is not None:
-        raise ValueError(f"Release {tag} already exists; refusing to overwrite")
+    page = 1
+    while True:
+        releases = api(f"/releases?per_page=100&page={page}", expected_type=list)
+        for item in releases:
+            if not isinstance(item, dict) or not isinstance(item.get("tag_name"), str):
+                raise ValueError("Malformed GitHub releases list")
+            if item["tag_name"] == tag:
+                raise ValueError(f"Release {tag} already exists (including drafts); refusing to overwrite")
+        if len(releases) < 100:
+            return
+        page += 1
 
 
 def available(tag):
@@ -121,8 +127,20 @@ def publish(sha):
         no_release(tag)
         if git("ls-remote", "--tags", "origin", f"refs/tags/{tag}") != f"{sha}\trefs/tags/{tag}":
             raise ValueError("Published tag no longer points at the selected SHA")
-        subprocess.run(["gh", "release", "create", tag, "--verify-tag", "--title", tag,
-                        "--generate-notes", *map(str, assets)], cwd=ROOT, check=True)
+        created = api("/releases", payload={
+            "tag_name": tag,
+            "target_commitish": sha,
+            "name": tag,
+            "draft": False,
+            "prerelease": False,
+            "generate_release_notes": True,
+        })
+        if (type(created.get("id")) is not int or created["id"] <= 0
+                or created.get("tag_name") != tag or created.get("draft") is not False):
+            raise ValueError("Unexpected created release response; inspect publication manually")
+        # Unlike `gh release create` with assets, upload never rolls back the release.
+        subprocess.run(["gh", "release", "upload", tag, *map(str, assets)],
+                       cwd=ROOT, check=True)
     except (OSError, ValueError, subprocess.SubprocessError):
         print(f"PARTIAL PUBLICATION: {tag} may have been pushed at {sha}. Inspect the tag, release "
               "and assets manually; do not delete, overwrite or retry Build. "

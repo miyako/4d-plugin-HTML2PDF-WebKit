@@ -91,9 +91,10 @@ class VersionTests(unittest.TestCase):
 class AvailabilityTests(unittest.TestCase):
     def test_unused_version(self):
         with patch.object(release, "git", return_value=""), \
-                patch.object(release, "api", side_effect=[{}, None]) as api:
+                patch.object(release, "api", side_effect=[{}, []]) as api:
             release.available("v1.2.3")
-            self.assertEqual(api.call_args_list[-1].args, ("/releases/tags/v1.2.3",))
+            self.assertEqual(api.call_args_list[-1].args, ("/releases?per_page=100&page=1",))
+            self.assertEqual(api.call_args_list[-1].kwargs, {"expected_type": list})
 
     def test_existing_tag_including_annotated(self):
         for refs in (f"{SHA}\trefs/tags/v1.2.3", f"{SHA}\trefs/tags/v1.2.3^{{}}"):
@@ -104,35 +105,74 @@ class AvailabilityTests(unittest.TestCase):
                 api.assert_not_called()
 
     def test_existing_release(self):
-        with patch.object(release, "git", return_value=""), \
-                patch.object(release, "api", side_effect=[{}, {"id": 42}]):
-            with self.assertRaisesRegex(ValueError, "Release .* already exists"):
-                release.available("v1.2.3")
+        for draft in (False, True):
+            with self.subTest(draft=draft), \
+                    patch.object(release, "git", return_value=""), \
+                    patch.object(release, "api", side_effect=[
+                        {}, [{"id": 42, "tag_name": "v1.2.3", "draft": draft}]]):
+                with self.assertRaisesRegex(ValueError, "Release .* already exists"):
+                    release.available("v1.2.3")
+
+    def test_paginated_draft_collision_and_unused_version(self):
+        first_page = [{"tag_name": f"v0.0.{index}"} for index in range(100)]
+        for last_page in ([], [{"tag_name": "v1.2.3", "draft": True}]):
+            with self.subTest(last_page=last_page), \
+                    patch.object(release, "api", side_effect=[{}, first_page, last_page]) as api:
+                if last_page:
+                    with self.assertRaisesRegex(ValueError, "including drafts"):
+                        release.no_release("v1.2.3")
+                else:
+                    release.no_release("v1.2.3")
+                self.assertEqual(api.call_args_list[-1].args,
+                                 ("/releases?per_page=100&page=2",))
+
+    def test_later_page_errors_and_malformed_items_fail_closed(self):
+        first_page = [{"tag_name": f"v0.0.{index}"} for index in range(100)]
+        with patch.object(release, "api", side_effect=[
+                {}, first_page, urllib.error.URLError("page 2 failed")]):
+            with self.assertRaises(urllib.error.URLError):
+                release.no_release("v1.2.3")
+        for item in ({}, None, "invalid", {"tag_name": None}):
+            with self.subTest(item=item), \
+                    patch.object(release, "api", side_effect=[{}, [item]]):
+                with self.assertRaisesRegex(ValueError, "Malformed"):
+                    release.no_release("v1.2.3")
 
     def test_git_failure_is_not_absence(self):
         with patch.object(release, "git", side_effect=subprocess.CalledProcessError(128, "git")):
             with self.assertRaises(subprocess.CalledProcessError):
                 release.available("v1.2.3")
 
-    def test_api_only_release_404_means_absent(self):
+    def test_api_http_failures_never_mean_absence(self):
         with patch.dict(os.environ, {"GITHUB_REPOSITORY": "owner/repo", "GH_TOKEN": "fixture"}):
             for status in (401, 403, 404, 429, 500):
-                for missing_ok in (False, True):
-                    with self.subTest(status=status, missing_ok=missing_ok):
+                for path in ("", "/releases?per_page=100&page=1"):
+                    with self.subTest(status=status, path=path):
                         error = urllib.error.HTTPError("url", status, "fixture", {}, None)
                         with patch.object(release.urllib.request, "urlopen", side_effect=error):
-                            if status == 404 and missing_ok:
-                                self.assertIsNone(release.api("/releases/tags/v1.2.3", True))
-                            else:
-                                with self.assertRaises(urllib.error.HTTPError):
-                                    release.api("", missing_ok)
+                            with self.assertRaises(urllib.error.HTTPError):
+                                release.api(path)
+
+    def test_api_get_and_create_only_post_transport(self):
+        payload = {"tag_name": "v1.2.3", "target_commitish": SHA, "draft": False}
+        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "owner/repo", "GH_TOKEN": "fixture"}):
+            for body in (None, payload):
+                with patch.object(release.urllib.request, "urlopen") as opener:
+                    opener.return_value.__enter__.return_value = io.BytesIO(b"{}")
+                    release.api("/releases", payload=body)
+                    request = opener.call_args.args[0]
+                    self.assertEqual(request.get_method(), "GET" if body is None else "POST")
+                    self.assertEqual(request.full_url,
+                                     "https://api.github.com/repos/owner/repo/releases")
+                    if body is not None:
+                        self.assertEqual(json.loads(request.data), payload)
 
     def test_api_network_and_malformed_response_fail(self):
         with patch.dict(os.environ, {"GITHUB_REPOSITORY": "owner/repo", "GH_TOKEN": "fixture"}):
             for error in (urllib.error.URLError("offline"), TimeoutError("timeout")):
                 with patch.object(release.urllib.request, "urlopen", side_effect=error):
                     with self.assertRaises(type(error)):
-                        release.api("/releases/tags/v1.2.3", True)
+                        release.api("/releases?per_page=100&page=1", expected_type=list)
             with patch.object(release.urllib.request, "urlopen") as opener:
                 opener.return_value.__enter__.return_value = io.BytesIO(b"invalid")
                 with self.assertRaises(json.JSONDecodeError):
@@ -141,6 +181,10 @@ class AvailabilityTests(unittest.TestCase):
                 opener.return_value.__enter__.return_value = io.BytesIO(b"null")
                 with self.assertRaises(ValueError):
                     release.api("")
+            with patch.object(release.urllib.request, "urlopen") as opener:
+                opener.return_value.__enter__.return_value = io.BytesIO(b"{}")
+                with self.assertRaises(ValueError):
+                    release.api("/releases?per_page=100&page=1", expected_type=list)
 
     def test_repository_failure_blocks_absence(self):
         with patch.object(release, "git", return_value=""), \
@@ -174,6 +218,8 @@ class PublicationTests(unittest.TestCase):
         with patch.object(release, "selected") as selected, \
                 patch.object(release, "available") as available, \
                 patch.object(release, "no_release") as no_release, \
+                patch.object(release, "api", return_value={
+                    "id": 42, "tag_name": self.tag, "draft": False}) as api, \
                 patch.object(release, "git", side_effect=["", f"{SHA}\trefs/tags/{self.tag}"]) as git, \
                 patch.object(release.subprocess, "run") as run:
             release.publish(SHA)
@@ -184,11 +230,47 @@ class PublicationTests(unittest.TestCase):
                 "-c", "push.followTags=false", "push", "--no-follow-tags",
                 "origin", f"{SHA}:refs/tags/{self.tag}"))
             command = run.call_args.args[0]
-            self.assertEqual(command[:8], ["gh", "release", "create", self.tag,
-                                          "--verify-tag", "--title", self.tag, "--generate-notes"])
-            self.assertEqual(command[8:], [str(self.root / f"HTML2PDF-{self.value}.{ext}")
+            self.assertEqual(command[:4], ["gh", "release", "upload", self.tag])
+            self.assertEqual(command[4:], [str(self.root / f"HTML2PDF-{self.value}.{ext}")
                                           for ext in ("zip", "dmg")])
+            api.assert_called_once_with("/releases", payload={
+                "tag_name": self.tag, "target_commitish": SHA, "name": self.tag,
+                "draft": False, "prerelease": False, "generate_release_notes": True})
             self.assertTrue(run.call_args.kwargs["check"])
+
+    def test_creation_and_upload_failures_never_rollback(self):
+        for failure in ("create", "upload", "malformed"):
+            with self.subTest(failure=failure), \
+                    patch.object(release, "selected"), patch.object(release, "available"), \
+                    patch.object(release, "no_release"), \
+                    patch.object(release, "git", side_effect=[
+                        "", f"{SHA}\trefs/tags/{self.tag}"]) as git, \
+                    patch.object(release, "api") as api, \
+                    patch.object(release.subprocess, "run") as run, \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                api.return_value = {"id": 42, "tag_name": self.tag, "draft": False}
+                if failure == "create":
+                    api.side_effect = urllib.error.HTTPError("url", 422, "collision", {}, None)
+                elif failure == "upload":
+                    run.side_effect = subprocess.CalledProcessError(1, ["gh", "release", "upload"])
+                else:
+                    api.return_value = {}
+                with self.assertRaises((OSError, ValueError, subprocess.SubprocessError)):
+                    release.publish(SHA)
+                self.assertIn("PARTIAL PUBLICATION", stderr.getvalue())
+                self.assertEqual(api.call_count, 1)
+                self.assertEqual(git.call_count, 2)
+                self.assertEqual(run.call_count, int(failure == "upload"))
+                if run.called:
+                    self.assertEqual(run.call_args.args[0][:4],
+                                     ["gh", "release", "upload", self.tag])
+                    self.assertNotIn("--clobber", run.call_args.args[0])
+
+    def test_no_destructive_publication_commands(self):
+        source = (ROOT / "scripts/release.py").read_text()
+        for forbidden in ('"DELETE"', '"PATCH"', '"--clobber"', '"--force"',
+                          '"delete"', '"edit"', '"create", tag'):
+            self.assertNotIn(forbidden, source)
 
     def test_recheck_blocks_tag_push(self):
         with patch.object(release, "selected"), \
